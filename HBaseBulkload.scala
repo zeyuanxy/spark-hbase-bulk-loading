@@ -175,4 +175,32 @@ object HBaseBulkload {
 
     mapRdd.unpersist()
   }
+
+  def toHBaseBulkWithFamilies(mapRdd: RDD[(Array[Byte], Map[String, Array[(String, (String, Long))]])], conf: Configuration, tableNameStr: String, families: Array[String], numFilesPerRegionPerFamily: Int = 1) = {
+    mapRdd.persist(StorageLevel.DISK_ONLY)
+
+    require(numFilesPerRegionPerFamily > 0)
+
+    val tableName = TableName.valueOf(tableNameStr)
+    val connection = ConnectionFactory.createConnection(conf)
+    val regionLocator = connection.getRegionLocator(tableName)
+    val table = connection.getTable(tableName)
+
+    val partitioner = getPartitioner(conf, regionLocator, numFilesPerRegionPerFamily)
+
+    val rdds = for {
+      f <- families
+      rdd = mapRdd
+        .collect { case (k, m) if m.contains(f) => (k, m(f)) }
+        .flatMap {
+          case (k, m) =>
+            m map { case (h: String, v: (String, Long)) => (((k, Bytes.toBytes(h)), v._2), Bytes.toBytes(v._1)) }
+        }
+    } yield getPartitionedRdd(rdd, f, partitioner)
+
+
+    saveAsHFile(rdds.reduce(_ ++ _), conf, table, regionLocator, connection)
+
+    mapRdd.unpersist()
+  }
 }
